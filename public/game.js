@@ -1,7 +1,9 @@
 (() => {
 'use strict';
 const S = window.SHARED, MAP = S.MAP, TAU = Math.PI * 2;
-const INTERP_DELAY = 0.11; // seconds behind server for remote entities
+const SOLO = !!window.SOLO_MODE;
+const INTERP_DELAY = SOLO ? 0.045 : 0.11; // seconds behind the simulation for remote entities
+let soloRoom = null, userPaused = false;
 
 // ---------- canvas ----------
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
@@ -283,15 +285,34 @@ const enemyFlash = new Map();
 function connect(name, room) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws?room=${encodeURIComponent(room)}&name=${encodeURIComponent(name)}`);
-  ws.onmessage = (ev) => {
-    const m = JSON.parse(ev.data);
+  ws.onmessage = (ev) => handleMsg(ev.data);
+  ws.onclose = () => { if (myId) showJoin('Disconnected from server.'); myId = 0; };
+  ws.onerror = () => showJoin('Could not connect.');
+}
+
+// Solo: run the same simulation in this page and talk to it through a fake socket.
+function connectSolo(name) {
+  const room = new window.SIM.Room('SOLO');
+  room.sendEvery = 1; room.noPerkTimeout = true;
+  soloRoom = room; userPaused = false;
+  const sock = { readyState: 1, bufferedAmount: 0, send: (data) => handleMsg(data) };
+  const p = room.addPlayer(sock, name);
+  ws = { readyState: 1, send: (data) => room.onMessage(p, data), close() { room.destroy(); soloRoom = null; } };
+}
+function soloPaused() { return !!soloRoom && soloRoom.paused; }
+function syncPause() { if (soloRoom) soloRoom.paused = userPaused; }
+// true while the simulation is frozen: someone in the room is picking a perk, or solo pause
+function isPaused() { const s = latestSnap(); return soloPaused() || !!(s && s.pz && s.pz.length && !s.ov); }
+document.addEventListener('visibilitychange', () => { if (document.hidden && soloRoom && !soloRoom.over) { userPaused = true; syncPause(); } });
+
+function handleMsg(data) {
+  {
+    const m = JSON.parse(data);
     if (m.t === 's') onSnap(m);
     else if (m.t === 'welcome') { myId = m.id; roomCode = m.room; document.getElementById('roomCode').textContent = roomCode; }
     else if (m.t === 'roster') { roster = new Map(m.list.map((p) => [p.id, p])); }
     else if (m.t === 'full') { showJoin('That room is full (8 players).'); }
-  };
-  ws.onclose = () => { if (myId) showJoin('Disconnected from server.'); myId = 0; };
-  ws.onerror = () => showJoin('Could not connect.');
+  }
 }
 
 function onSnap(m) {
@@ -317,6 +338,8 @@ function onSnap(m) {
   lastSrvW = me.w; lastSrvAmmo = me.am;
   if (prev && !prev.rl && me.rl) SFX.reload();
   updatePerkUI();
+  const mine = m.pz && m.pz.find((z) => z[0] === myId), pt = document.getElementById('perkT');
+  if (pt) pt.textContent = mine && mine[1] ? ` · auto-pick in ${mine[1]}s` : '';
   if (m.ov && !overShown) showOver(m);
 }
 
@@ -367,6 +390,7 @@ addEventListener('keydown', (e) => {
   if (e.code === 'KeyR') { if (latestSnap() && latestSnap().ov) restart(); else reloadReq = true; }
   if (e.code === 'Digit1' || e.code === 'Digit2' || e.code === 'Digit3') choosePerk(+e.code.slice(5) - 1);
   if (e.code === 'Space') e.preventDefault();
+  if (SOLO && (e.code === 'Escape' || e.code === 'KeyP') && soloRoom && !soloRoom.over) { userPaused = !userPaused; syncPause(); }
 });
 addEventListener('keyup', (e) => { keys[e.code] = false; });
 addEventListener('blur', () => { for (const k in keys) keys[k] = false; mouse.down = false; });
@@ -392,7 +416,7 @@ function updatePerkUI() {
   const k = me && me.ch ? me.ch.join(',') + '|' + me.pd : '';
   if (k === perkKey) return; perkKey = k;
   if (!k) { perksEl.classList.add('hidden'); return; }
-  perksEl.innerHTML = `<h2>LEVEL UP — PICK A PERK${me.pd > 1 ? ` (${me.pd})` : ''}</h2><div class="row">` +
+  perksEl.innerHTML = `<h2>LEVEL UP — PICK A PERK${me.pd > 1 ? ` (${me.pd})` : ''}<span id="perkT"></span></h2><div class="row">` +
     me.ch.map((key, i) => {
       const p = S.PERKS.find((x) => x.key === key), have = (me.pr && me.pr[key]) || 0;
       return `<button class="perk" data-i="${i}"><div class="k">[${i + 1}]${have ? ` · owned ${have}/${p.max}` : ''}</div><div class="n">${p.name}</div><div class="d">${p.desc}</div></button>`;
@@ -406,11 +430,19 @@ function fmtTime(t) { t = Math.floor(t); return `${Math.floor(t / 60)}:${String(
 function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 function showOver(m) {
   overShown = true;
+  let best = '';
+  if (SOLO) {
+    const mine = m.p.find((p) => p[0] === myId) || [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0];
+    let hs = {}; try { hs = JSON.parse(localStorage.getItem('ch_best') || '{}'); } catch {}
+    const isNew = !hs.time || m.tm > hs.time;
+    if (isNew) { hs = { time: m.tm, kills: mine[10], level: mine[7] }; try { localStorage.setItem('ch_best', JSON.stringify(hs)); } catch {} }
+    best = isNew ? '<div style="color:#ffd54f;margin:-8px 0 16px">NEW BEST!</div>' : `<div style="color:#8d7c63;margin:-8px 0 16px">Best: ${fmtTime(hs.time)} · ${hs.kills} kills · level ${hs.level}</div>`;
+  }
   const rows = m.p.slice().sort((a, b) => b[10] - a[10]).map((p) => {
     const r = roster.get(p[0]) || { name: '?', color: '#fff' };
     return `<tr><td style="color:${r.color}">${esc(r.name)}</td><td>${p[10]}</td><td>${p[7]}</td><td>${S.WEAPONS[p[6]].name}</td></tr>`;
   }).join('');
-  overEl.innerHTML = `<div class="panel"><h2>WIPED OUT</h2><div class="time">Survived ${fmtTime(m.tm)}</div>
+  overEl.innerHTML = `<div class="panel"><h2>${SOLO ? 'YOU DIED' : 'WIPED OUT'}</h2><div class="time">Survived ${fmtTime(m.tm)}</div>${best}
     <table><tr><th>PLAYER</th><th>KILLS</th><th>LEVEL</th><th>WEAPON</th></tr>${rows}</table>
     <button id="again">PLAY AGAIN</button><div style="margin-top:10px;font-size:12px;color:#7d6d58">or press R</div></div>`;
   overEl.classList.remove('hidden');
@@ -427,19 +459,54 @@ function showJoin(msg) {
 const nameIn = document.getElementById('name'), roomIn = document.getElementById('room');
 const qs = new URLSearchParams(location.search);
 nameIn.value = localStorage.getItem('ch_name') || '';
-roomIn.value = (qs.get('room') || Math.random().toString(36).slice(2, 7)).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
-function join() {
+const cleanCode = (c) => String(c || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
+const newCode = () => Math.random().toString(36).slice(2, 7).toUpperCase();
+const invite = cleanCode(qs.get('room'));
+function join(code) {
   const name = nameIn.value.trim() || 'Player' + ((Math.random() * 99) | 0);
-  const room = roomIn.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8) || 'LOBBY';
+  const room = cleanCode(code) || newCode();
   localStorage.setItem('ch_name', name);
-  history.replaceState(null, '', '?room=' + room);
+  if (!SOLO) history.replaceState(null, '', '?room=' + room);
   initAudio(); if (AC && AC.state === 'suspended') AC.resume();
-  joinEl.classList.add('hidden'); roombar.classList.remove('hidden');
+  joinEl.classList.add('hidden');
   lastRound = 0;
+  if (SOLO) { myId = 0; connectSolo(name); return; }
+  roombar.classList.remove('hidden');
   connect(name, room);
 }
-document.getElementById('play').onclick = join;
-[nameIn, roomIn].forEach((el) => el.addEventListener('keydown', (e) => { if (e.key === 'Enter') join(); }));
+const playBtn = document.getElementById('play');
+playBtn.onclick = () => join(SOLO ? '' : invite || newCode());
+if (!SOLO) {
+  if (invite) { playBtn.textContent = `JOIN ROOM ${invite}`; document.getElementById('newRoom').classList.remove('hidden'); }
+  else playBtn.textContent = 'CREATE NEW ROOM';
+  document.getElementById('newRoom').onclick = () => join(newCode());
+  document.getElementById('joinCode').onclick = () => { const c = cleanCode(roomIn.value); if (c) join(c); else roomIn.focus(); };
+  roomIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.stopPropagation(); document.getElementById('joinCode').click(); } });
+  const listEl = document.getElementById('roomList');
+  listEl.addEventListener('click', (e) => { const b = e.target.closest('[data-code]'); if (b && !b.disabled) join(b.dataset.code); });
+  async function refreshRooms() {
+    if (joinEl.classList.contains('hidden')) return;
+    try {
+      const r = await (await fetch('rooms', { cache: 'no-store' })).json();
+      if (!r.rooms.length) { listEl.innerHTML = '<div class="empty">No games running. Create one and send the link.</div>'; return; }
+      listEl.innerHTML = r.rooms.map((rm) => {
+        const full = rm.n >= r.max;
+        const status = rm.over ? 'game over' : rm.t > 0 ? `${fmtTime(rm.t)} in` : 'starting';
+        return `<div class="roomRow${rm.code === invite ? ' invited' : ''}"><div class="rInfo"><b>${esc(rm.code)}</b> <span class="rCount">${rm.n}/${r.max}</span> <span class="rStatus">${status}</span>` +
+          `<div class="rNames">${rm.names.map(esc).join(', ')}</div></div><button data-code="${esc(rm.code)}"${full ? ' disabled' : ''}>${full ? 'FULL' : 'JOIN'}</button></div>`;
+      }).join('');
+    } catch { listEl.innerHTML = '<div class="empty">Could not load rooms.</div>'; }
+  }
+  refreshRooms(); setInterval(refreshRooms, 3000);
+}
+if (SOLO) {
+  document.getElementById('lobby').classList.add('hidden');
+  document.getElementById('play').textContent = 'START';
+  document.querySelector('#join .tag').textContent = 'Survive the horde. Pick perks. Beat your best time.';
+  document.querySelector('#join .help').innerHTML = '<b>WASD</b> move · <b>Mouse</b> aim · <b>LMB</b> shoot · <b>R</b> reload · <b>1 2 3</b> pick perk · <b>Esc</b> pause<br>The game pauses while you choose a perk.';
+  try { const hs = JSON.parse(localStorage.getItem('ch_best') || 'null'); if (hs) document.getElementById('joinMsg').innerHTML = `<span style="color:#ffd54f">Best: ${fmtTime(hs.time)} · ${hs.kills} kills · level ${hs.level}</span>`; } catch {}
+}
+nameIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') playBtn.click(); });
 document.getElementById('copy').onclick = (e) => {
   const link = location.origin + location.pathname + '?room=' + roomCode;
   (navigator.clipboard ? navigator.clipboard.writeText(link) : Promise.reject()).then(
@@ -459,7 +526,7 @@ function frame(nowMs) {
 requestAnimationFrame(frame);
 
 function update(dt) {
-  const s = latestSnap(); const over = s && s.ov;
+  const s = latestSnap(); const over = (s && s.ov) || isPaused();
   if (!me.dn && !over) {
     let mx = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
     let my = (keys.KeyS || keys.ArrowDown ? 1 : 0) - (keys.KeyW || keys.ArrowUp ? 1 : 0);
@@ -585,7 +652,7 @@ function render(dt, t) {
   }
 
   // bullets: extrapolate from newest snapshot
-  const bdt = clamp(performance.now() / 1000 - L.rt, 0, 0.15);
+  const bdt = isPaused() ? 0 : clamp(performance.now() / 1000 - L.rt, 0, 0.15);
   ctx.lineCap = 'round';
   for (const bl of L.b) {
     const x = bl[0] + bl[2] * bdt, y = bl[1] + bl[3] * bdt, vx = bl[2], vy = bl[3];
@@ -720,7 +787,7 @@ function drawHUD(L, players, t) {
   // team list
   ctx.textAlign = 'right';
   let ty = 26;
-  for (const p of L.p) {
+  for (const p of SOLO ? [] : L.p) {
     const r = roster.get(p[0]) || { name: '?', color: '#fff' };
     ctx.font = (p[0] === myId ? 'bold ' : '') + '13px "Share Tech Mono", ui-monospace, monospace';
     ctx.fillStyle = p[5] ? '#ff5252' : r.color;
@@ -752,6 +819,24 @@ function drawHUD(L, players, t) {
     ctx.save(); ctx.translate(ex, ey); ctx.rotate(an);
     ctx.fillStyle = Math.floor(t * 3) % 2 ? '#69f0ae' : '#ff5252';
     ctx.beginPath(); ctx.moveTo(14, 0); ctx.lineTo(-8, -9); ctx.lineTo(-8, 9); ctx.closePath(); ctx.fill(); ctx.restore();
+  }
+
+  if (!SOLO && L.pz && L.pz.length && !L.ov) {
+    const others = L.pz.filter((z) => z[0] !== myId);
+    ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 34px Oswald, sans-serif'; ctx.fillStyle = '#f3e9d6'; ctx.fillText('PAUSED', W / 2, H / 2 - 110);
+    if (others.length) {
+      const names = others.map((z) => (roster.get(z[0]) || { name: '?' }).name);
+      const secs = Math.max(...others.map((z) => z[1]));
+      ctx.font = '15px "Share Tech Mono", ui-monospace, monospace'; ctx.fillStyle = '#ffd54f';
+      ctx.fillText(`${names.join(', ')} ${names.length > 1 ? 'are' : 'is'} picking a perk · ${secs}s`, W / 2, H / 2 - 84);
+    }
+  }
+  if (soloRoom && userPaused && !L.ov) {
+    ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center'; ctx.font = 'bold 44px Oswald, sans-serif'; ctx.fillStyle = '#f3e9d6'; ctx.fillText('PAUSED', W / 2, H / 2);
+    ctx.font = '14px "Share Tech Mono", ui-monospace, monospace'; ctx.fillStyle = '#b9a98e'; ctx.fillText('Press Esc to resume', W / 2, H / 2 + 28);
   }
 
   // downed message

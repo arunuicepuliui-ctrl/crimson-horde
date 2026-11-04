@@ -13,11 +13,16 @@
 
 <div id="join">
   <div class="panel">
-    <h1>CRIMSON<span>HORDE</span></h1>
+    <h1>CRIMSON <span>HORDE</span></h1>
     <p class="tag">Co-op survival. Kill everything. Pick perks. Revive your friends.</p>
     <label>Name<input id="name" maxlength="16" autocomplete="off"></label>
-    <label>Room code<input id="room" maxlength="8" autocomplete="off"></label>
     <button id="play">ENTER</button>
+    <div id="lobby">
+      <button id="newRoom" class="ghost hidden">OR CREATE A NEW ROOM</button>
+      <div class="lobbyHead">OPEN ROOMS</div>
+      <div id="roomList"><div class="empty">Loading…</div></div>
+      <div class="codeRow"><input id="room" maxlength="8" placeholder="Room code" autocomplete="off"><button id="joinCode">JOIN</button></div>
+    </div>
     <p id="joinMsg"></p>
     <div class="help">
       <b>WASD</b> move · <b>Mouse</b> aim · <b>LMB</b> shoot · <b>R</b> reload · <b>1 2 3</b> pick perk<br>
