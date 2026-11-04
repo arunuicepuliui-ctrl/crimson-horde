@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Crimson Horde</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="join">
+  <div class="panel">
+    <h1>CRIMSON<span>HORDE</span></h1>
+    <p class="tag">Co-op survival. Kill everything. Pick perks. Revive your friends.</p>
+    <label>Name<input id="name" maxlength="16" autocomplete="off"></label>
+    <label>Room code<input id="room" maxlength="8" autocomplete="off"></label>
+    <button id="play">ENTER</button>
+    <p id="joinMsg"></p>
+    <div class="help">
+      <b>WASD</b> move · <b>Mouse</b> aim · <b>LMB</b> shoot · <b>R</b> reload · <b>1 2 3</b> pick perk<br>
+      Stand next to a downed friend to revive them. If everyone goes down, it's over.
+    </div>
+  </div>
+</div>
+
+<div id="roombar" class="hidden">
+  ROOM <b id="roomCode"></b>
+  <button id="copy">Copy invite link</button>
+</div>
+
+<div id="perks" class="hidden"></div>
+<div id="over" class="hidden"></div>
+
+<script src="shared.js"></script>
+<script src="game.js"></script>
+</body>
+</html>
