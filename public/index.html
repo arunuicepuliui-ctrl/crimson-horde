@@ -15,6 +15,9 @@
   <div class="panel">
     <h1>CRIMSON <span>HORDE</span></h1>
     <p class="tag">Co-op survival. Kill everything. Pick perks. Revive your friends.</p>
+    <div class="tabs"><button class="tab active" data-tab="Play">PLAY</button><button class="tab" data-tab="Top">TOP 10</button></div>
+    <div id="tabTop" class="hidden"><div id="topList"><div class="empty">Loading…</div></div></div>
+    <div id="tabPlay">
     <label>Name<input id="name" maxlength="16" autocomplete="off"></label>
     <button id="play">ENTER</button>
     <div id="lobby">
@@ -27,6 +30,7 @@
     <div class="help">
       <b>WASD</b> move · <b>Mouse</b> aim · <b>LMB</b> shoot · <b>R</b> reload · <b>1 2 3</b> pick perk<br>
       Stand next to a downed friend to revive them. If everyone goes down, it's over.
+    </div>
     </div>
   </div>
 </div>

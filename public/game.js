@@ -322,10 +322,32 @@ function connect(name, room) {
   ws.onerror = () => showJoin('Could not connect.');
 }
 
+// Solo top 10: best runs kept in this browser.
+const soloBoard = {
+  list() { try { const l = JSON.parse(localStorage.getItem('ch_top') || '[]'); return Array.isArray(l) ? l : []; } catch { return []; } },
+  submit(run) {
+    if (run.kills <= 0) return false;
+    const l = this.list(); l.push(run);
+    l.sort((a, b) => b.kills - a.kills || b.time - a.time || a.date - b.date);
+    l.length = Math.min(l.length, 10);
+    try { localStorage.setItem('ch_top', JSON.stringify(l)); } catch {}
+    this.last = run; return l.some((e) => e.date === run.date && e.name === run.name);
+  },
+  rankOf(run) { return this.list().findIndex((e) => e.date === run.date && e.name === run.name) + 1; },
+};
+
+// carry over the single best run saved by the previous solo version
+try {
+  const old = JSON.parse(localStorage.getItem('ch_best') || 'null');
+  if (old && old.kills > 0 && !soloBoard.list().length) soloBoard.submit({ name: localStorage.getItem('ch_name') || 'You', kills: old.kills, level: old.level, time: Math.floor(old.time), team: 1, weapon: '', date: Date.now() });
+  localStorage.removeItem('ch_best');
+} catch {}
+
 // Solo: run the same simulation in this page and talk to it through a fake socket.
 function connectSolo(name) {
   const room = new window.SIM.Room('SOLO');
   room.sendEvery = 1; room.noPerkTimeout = true;
+  room.leaderboard = soloBoard;
   soloRoom = room; userPaused = false;
   const sock = { readyState: 1, bufferedAmount: 0, send: (data) => handleMsg(data) };
   const p = room.addPlayer(sock, name);
@@ -409,6 +431,11 @@ function processEvents(ev) {
       case 'pk': { const s = latestSnap(), p = s && s.Pm.get(e[1]); const pk = S.PERKS.find((k) => k.key === e[2]); if (p && pk) floatText(p[1], p[2] - 34, pk.name, '#ffe082'); break; }
       case 'dn': { const s = latestSnap(), p = s && s.Pm.get(e[1]); if (p) floatText(p[1], p[2] - 30, 'DOWN!', '#ff5252', true); SFX.down(); break; }
       case 'rv': { const s = latestSnap(), p = s && s.Pm.get(e[1]); if (p) floatText(p[1], p[2] - 30, 'REVIVED', '#69f0ae', true); SFX.pickup(); break; }
+      case 'lb': {
+        if (e[1] === myId) { const el = document.getElementById('overRank'); if (el) el.textContent = e[2] === 1 ? 'NEW #1 ON THE TOP 10!' : `#${e[2]} ON THE TOP 10!`; }
+        else { const r = roster.get(e[1]); if (r) floatText(local.x, local.y - 60, `${r.name} made #${e[2]} on the top 10`, '#ffd54f', true); }
+        break;
+      }
       case 'boss': floatText(local.x, local.y - 70, 'SOMETHING BIG IS COMING', '#ff7043', true); SFX.boss(); break;
     }
   }
@@ -462,14 +489,7 @@ function fmtTime(t) { t = Math.floor(t); return `${Math.floor(t / 60)}:${String(
 function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 function showOver(m) {
   overShown = true;
-  let best = '';
-  if (SOLO) {
-    const mine = m.p.find((p) => p[0] === myId) || [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0];
-    let hs = {}; try { hs = JSON.parse(localStorage.getItem('ch_best') || '{}'); } catch {}
-    const isNew = !hs.time || m.tm > hs.time;
-    if (isNew) { hs = { time: m.tm, kills: mine[10], level: mine[7] }; try { localStorage.setItem('ch_best', JSON.stringify(hs)); } catch {} }
-    best = isNew ? '<div style="color:#ffd54f;margin:-8px 0 16px">NEW BEST!</div>' : `<div style="color:#8d7c63;margin:-8px 0 16px">Best: ${fmtTime(hs.time)} · ${hs.kills} kills · level ${hs.level}</div>`;
-  }
+  const best = '<div id="overRank"></div>';
   const rows = m.p.slice().sort((a, b) => b[10] - a[10]).map((p) => {
     const r = roster.get(p[0]) || { name: '?', color: '#fff' };
     return `<tr><td style="color:${r.color}">${esc(r.name)}</td><td>${p[10]}</td><td>${p[7]}</td><td>${S.WEAPONS[p[6]].name}</td></tr>`;
@@ -485,6 +505,7 @@ const joinEl = document.getElementById('join'), roombar = document.getElementByI
 function showJoin(msg) {
   joinEl.classList.remove('hidden'); roombar.classList.add('hidden'); perksEl.classList.add('hidden'); overEl.classList.add('hidden');
   document.getElementById('joinMsg').textContent = msg || '';
+  if (!document.getElementById('tabTop').classList.contains('hidden')) loadTop();
   me = null; snaps = []; perkKey = '';
   if (ws) { ws.onclose = null; try { ws.close(); } catch {} ws = null; }
 }
@@ -506,6 +527,30 @@ function join(code) {
   roombar.classList.remove('hidden');
   connect(name, room);
 }
+// ---- PLAY / TOP 10 tabs ----
+const topEl = document.getElementById('topList');
+function fmtDate(ms) { const d = new Date(ms); return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' }); }
+async function loadTop() {
+  let list = [];
+  try {
+    if (SOLO) list = soloBoard.list();
+    else list = (await (await fetch('leaderboard', { cache: 'no-store' })).json()).top || [];
+  } catch { topEl.innerHTML = '<div class="empty">Could not load the top 10.</div>'; return; }
+  if (!list.length) { topEl.innerHTML = `<div class="empty">No scores yet. ${SOLO ? 'Play a run' : 'Finish a run'} to get on the board.</div>`; return; }
+  const myName = (nameIn.value || localStorage.getItem('ch_name') || '').trim().toLowerCase();
+  topEl.innerHTML = '<table><tr><th></th><th>NAME</th><th>KILLS</th><th>LVL</th><th>TIME</th>' + (SOLO ? '' : '<th>TEAM</th>') + '<th>DATE</th></tr>' +
+    list.map((r, i) => `<tr class="${i < 3 ? 'g' + (i + 1) : ''}${r.name.toLowerCase() === myName ? ' me' : ''}" title="${esc(r.weapon || '')}">` +
+      `<td class="rk">${i + 1}</td><td class="nm">${esc(r.name)}</td><td class="kl">${r.kills}</td><td>${r.level}</td><td>${fmtTime(r.time)}</td>` +
+      (SOLO ? '' : `<td>${r.team > 1 ? r.team + 'p' : 'solo'}</td>`) + `<td>${fmtDate(r.date)}</td></tr>`).join('') +
+    `</table><div class="note">${SOLO ? 'Best runs in this browser.' : 'Ranked by kills · each name\'s best run'}</div>`;
+}
+document.querySelectorAll('#join .tab').forEach((tb) => tb.addEventListener('click', () => {
+  document.querySelectorAll('#join .tab').forEach((x) => x.classList.toggle('active', x === tb));
+  document.getElementById('tabPlay').classList.toggle('hidden', tb.dataset.tab !== 'Play');
+  document.getElementById('tabTop').classList.toggle('hidden', tb.dataset.tab !== 'Top');
+  if (tb.dataset.tab === 'Top') loadTop();
+}));
+
 const playBtn = document.getElementById('play');
 playBtn.onclick = () => join(SOLO ? '' : invite || newCode());
 if (!SOLO) {
@@ -536,7 +581,6 @@ if (SOLO) {
   document.getElementById('play').textContent = 'START';
   document.querySelector('#join .tag').textContent = 'Survive the horde. Pick perks. Beat your best time.';
   document.querySelector('#join .help').innerHTML = '<b>WASD</b> move · <b>Mouse</b> aim · <b>LMB</b> shoot · <b>R</b> reload · <b>1 2 3</b> pick perk · <b>Esc</b> pause<br>The game pauses while you choose a perk.';
-  try { const hs = JSON.parse(localStorage.getItem('ch_best') || 'null'); if (hs) document.getElementById('joinMsg').innerHTML = `<span style="color:#ffd54f">Best: ${fmtTime(hs.time)} · ${hs.kills} kills · level ${hs.level}</span>`; } catch {}
 }
 nameIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') playBtn.click(); });
 document.getElementById('copy').onclick = (e) => {

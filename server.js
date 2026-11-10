@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('ws');
 const { Room, MAX_PLAYERS } = require('./public/sim.js');
+const leaderboard = require('./leaderboard.js');
 
 const PORT = +process.env.PORT || 3000;
 const PUB = path.join(__dirname, 'public');
@@ -12,11 +13,16 @@ const PUB = path.join(__dirname, 'public');
 // ---------------- HTTP + WS bootstrap ----------------
 function start(port = PORT) {
   const rooms = new Map();
+  leaderboard.load();
   const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' };
   const server = http.createServer((req, res) => {
     let p;
     try { p = decodeURIComponent(req.url.split('?')[0]); } catch { res.writeHead(400); return res.end(); }
     if (p === '/health') { res.writeHead(200); return res.end('ok'); }
+    if (p === '/leaderboard') {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      return res.end(JSON.stringify({ top: leaderboard.top(10) }));
+    }
     if (p === '/rooms') {
       const list = [...rooms.values()].map((r) => r.summary()).sort((a, b) => b.n - a.n);
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
@@ -38,7 +44,7 @@ function start(port = PORT) {
     const code = (u.searchParams.get('room') || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8) || 'LOBBY';
     const name = (u.searchParams.get('name') || '').replace(/[^\p{L}\p{N} _.\-]/gu, '').trim().slice(0, 16) || 'Player';
     let room = rooms.get(code);
-    if (!room) { room = new Room(code); rooms.set(code, room); }
+    if (!room) { room = new Room(code); room.leaderboard = leaderboard; rooms.set(code, room); }
     if (room.players.size >= MAX_PLAYERS) { ws.send(JSON.stringify({ t: 'full' })); ws.close(); return; }
     const p = room.addPlayer(ws, name);
     ws.isAlive = true;

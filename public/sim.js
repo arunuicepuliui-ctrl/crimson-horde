@@ -74,7 +74,22 @@ class Room {
     return { code: this.code, n: this.players.size, names: [...this.players.values()].map((p) => p.name), t: Math.floor(this.t), over: this.over };
   }
 
-  removePlayer(p) { this.players.delete(p.id); this.broadcastRoster(); }
+  removePlayer(p) { if (!this.over) this.reportRuns([p]); this.players.delete(p.id); this.broadcastRoster(); }
+
+  // Hand finished runs to the leaderboard (host sets room.leaderboard = { submit, rankOf }). Once per player per round.
+  // All runs are submitted first, then ranks are read, so teammates finishing together get correct places.
+  reportRuns(list) {
+    const lb = this.leaderboard;
+    if (!lb || this.t < 5) return;
+    const placed = [];
+    for (const p of list) {
+      if (p.reportedRound === this.round) continue;
+      p.reportedRound = this.round;
+      const run = { name: p.name, kills: p.kills, level: p.level, time: Math.floor(this.t), team: this.players.size, weapon: S.WEAPONS[p.weapon].name, date: Date.now() };
+      if (lb.submit(run)) placed.push([p, run]);
+    }
+    for (const [p, run] of placed) { const rank = lb.rankOf(run); if (rank > 0 && rank <= 10) this.ev.push(['lb', p.id, rank]); }
+  }
 
   broadcastRoster() {
     const list = [...this.players.values()].map((p) => ({ id: p.id, name: p.name, color: p.color }));
@@ -145,7 +160,7 @@ class Room {
     const dt = DT;
     const all = [...this.players.values()];
     const alive = all.filter((p) => !p.downed);
-    if (!alive.length) { this.over = true; this.ev.push(['o']); return; }
+    if (!alive.length) { this.over = true; this.ev.push(['o']); this.reportRuns(all); return; }
     this.t += dt;
     if (this.freezeT > 0) this.freezeT -= dt;
     for (const p of all) this.updatePlayer(p, dt);
