@@ -7,9 +7,10 @@ let soloRoom = null, userPaused = false;
 
 // ---------- canvas ----------
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
-let W = 0, H = 0, DPR = 1, ZOOM = 1;
+let W = 0, H = 0, DPR = 1, ZOOM = 1, dprCap = 2, vignette = null;
 function resize() {
-  DPR = Math.min(2, window.devicePixelRatio || 1);
+  DPR = Math.min(dprCap, window.devicePixelRatio || 1);
+  vignette = null;
   W = innerWidth; H = innerHeight;
   cv.width = W * DPR; cv.height = H * DPR;
   cv.style.width = W + 'px'; cv.style.height = H + 'px';
@@ -107,7 +108,7 @@ function ell(c, x, y, rx, ry, fill, stroke, lw = 2) {
 
 function drawEnemy(c, ti, x, y, a, t, o = {}) {
   const P = o.dead ? DARK[ti] : PAL[ti];
-  const ph = o.dead ? 0 : t + (x * 0.013 + y * 0.007);
+  const ph = o.dead ? 0 : o.ph !== undefined ? o.ph : t + (x * 0.013 + y * 0.007);
   c.save(); c.translate(x, y); c.rotate(a);
   if (!o.dead) ell(c, 3, 4, S.ENEMIES[ti].r * 1.05, S.ENEMIES[ti].r * 0.9, 'rgba(0,0,0,.28)');
   switch (ti) {
@@ -150,7 +151,7 @@ function drawEnemy(c, ti, x, y, a, t, o = {}) {
     case 3: { // spitter
       const pu = 1 + Math.sin(ph * 5) * 0.08;
       ell(c, -2, 0, 15 * pu, 14 * pu, P.c1, P.o);
-      for (let i = 0; i < 4; i++) { const aa = i * 1.57 + 0.6 + ph * 0.5; ell(c, Math.cos(aa) * 8 - 2, Math.sin(aa) * 8, 5 * pu, 5 * pu, P.c3); }
+      for (let i = 0; i < 4; i++) { const aa = i * 1.57 + 0.6 + ph * 1.25; ell(c, Math.cos(aa) * 8 - 2, Math.sin(aa) * 8, 5 * pu, 5 * pu, P.c3); }
       ell(c, 11, 0, 5, 4, o.dead ? P.c2 : '#9fe34a', P.o, 1.5);
       if (!o.dead) { c.globalAlpha = 0.35; ell(c, 13, 0, 8, 6, '#b7ff5a'); c.globalAlpha = 1; }
       break;
@@ -172,6 +173,37 @@ function drawEnemy(c, ti, x, y, a, t, o = {}) {
   if (o.frozen) { c.globalAlpha = 0.45; ell(c, 0, 0, S.ENEMIES[ti].r + 3, S.ENEMIES[ti].r + 3, '#bfe9ff', '#e8f8ff', 1.5); c.globalAlpha = 1; }
   if (o.flash) { c.globalAlpha = 0.5; ell(c, 0, 0, S.ENEMIES[ti].r, S.ENEMIES[ti].r, '#fff'); c.globalAlpha = 1; }
   c.restore();
+}
+
+// Pre-rendered enemy animation frames. Drawing vector shapes for hundreds of enemies every frame
+// is what made crowds laggy; stamping cached bitmaps is many times cheaper.
+const ANIM_W = [6, 20, 9, 5, 3];          // animation angular speed per enemy type (matches drawEnemy)
+const SPR_HALF = [32, 28, 42, 28, 62];    // half-size of each sprite box in world units
+const SPR_FRAMES = 12;
+let sprites = null, spriteScale = 0;
+function buildSprites(scale) {
+  spriteScale = scale;
+  sprites = SPR_HALF.map((half, ti) => [{}, { flash: true }, { frozen: true }].map((variant) => {
+    const out = [];
+    for (let k = 0; k < SPR_FRAMES; k++) {
+      const c = document.createElement('canvas');
+      c.width = c.height = Math.ceil(half * 2 * scale);
+      const x = c.getContext('2d');
+      x.setTransform(scale, 0, 0, scale, half * scale, half * scale);
+      drawEnemy(x, ti, 0, 0, 0, 0, Object.assign({ ph: (k / SPR_FRAMES) * TAU / ANIM_W[ti] }, variant));
+      out.push(c);
+    }
+    return out;
+  }));
+}
+// draws one enemy sprite; Z = world->device scale, (ox, oy) = camera top-left in world units
+function stampEnemy(ti, x, y, a, t, variant, Z, ox, oy) {
+  const ph = t + (x * 0.013 + y * 0.007);
+  let f = ((ph * ANIM_W[ti]) / TAU) % 1; if (f < 0) f += 1;
+  const img = sprites[ti][variant][(f * SPR_FRAMES) | 0];
+  const cs = Math.cos(a), sn = Math.sin(a), h = SPR_HALF[ti] * spriteScale;
+  ctx.setTransform(cs, sn, -sn, cs, (x - ox) * Z, (y - oy) * Z);
+  ctx.drawImage(img, -h, -h);
 }
 
 const GUNLEN = [16, 17, 20, 24, 22, 26, 24, 20];
@@ -516,8 +548,15 @@ document.getElementById('copy').onclick = (e) => {
 
 // ---------- main loop ----------
 let lastT = performance.now();
+let slowEma = 16, slowFor = 0;
 function frame(nowMs) {
-  const dt = Math.min(0.05, (nowMs - lastT) / 1000); lastT = nowMs;
+  const raw = nowMs - lastT;
+  const dt = Math.min(0.05, raw / 1000); lastT = nowMs;
+  if (me && raw < 200) {
+    slowEma += (raw - slowEma) * 0.05;
+    slowFor = slowEma > 24 ? slowFor + raw : 0;
+    if (slowFor > 3000 && DPR > 1) { dprCap = 1; resize(); slowFor = 0; }
+  }
   sndBudget = 10;
   if (me) update(dt);
   render(dt, nowMs / 1000);
@@ -614,6 +653,9 @@ function render(dt, t) {
   // enemies
   const Ea = a.Em;
   let bossBars = [];
+  const Z = DPR * ZOOM;
+  if (!sprites || spriteScale !== Z) buildSprites(Z);
+  const variant = frozen ? 2 : 0;
   for (const [id, eb] of b.Em) {
     const ea = Ea.get(id) || eb;
     const x = lerp(ea[2], eb[2], al), y = lerp(ea[3], eb[3], al);
@@ -622,10 +664,11 @@ function render(dt, t) {
     const prevHp = enemyFlash.get(id);
     const flash = prevHp !== undefined && eb[5] < prevHp;
     enemyFlash.set(id, eb[5]);
-    drawEnemy(ctx, eb[1], x, y, ang, t, { frozen, flash });
+    stampEnemy(eb[1], x, y, ang, t, flash ? 1 : variant, Z, left, top);
     if (eb[1] === 4) bossBars.push([x, y, eb[5]]);
   }
   if (enemyFlash.size > 3000) enemyFlash.clear();
+  ctx.setTransform(Z, 0, 0, Z, -left * Z, -top * Z);
   for (const [x, y, hp] of bossBars) {
     ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(x - 32, y - 50, 64, 6);
     ctx.fillStyle = '#e53935'; ctx.fillRect(x - 32, y - 50, 64 * hp / 100, 6);
@@ -683,7 +726,7 @@ function render(dt, t) {
     if (p.life <= 0) {
       if (p.kind === 'blood') { g.globalAlpha = 0.7; g.fillStyle = p.color; g.beginPath(); g.arc(p.x, p.y, p.size, 0, TAU); g.fill(); g.globalAlpha = 1; }
       else if (p.kind === 'shell') { g.globalAlpha = 0.8; g.fillStyle = '#8a6d24'; g.fillRect(p.x, p.y, 3, 1.5); g.globalAlpha = 1; }
-      parts.splice(i, 1); continue;
+      parts[i] = parts[parts.length - 1]; parts.pop(); continue;
     }
     const f = p.life / p.max;
     if (p.kind === 'smoke') { ctx.globalAlpha = f * 0.5; ell(ctx, p.x, p.y, p.size * (2 - f), p.size * (2 - f), p.color); }
@@ -711,9 +754,11 @@ function render(dt, t) {
 
   // ---- screen space ----
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  const vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.max(W, H) * 0.75);
-  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.6)');
-  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+  if (!vignette) {
+    vignette = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.max(W, H) * 0.75);
+    vignette.addColorStop(0, 'rgba(0,0,0,0)'); vignette.addColorStop(1, 'rgba(0,0,0,.6)');
+  }
+  ctx.fillStyle = vignette; ctx.fillRect(0, 0, W, H);
   if (frozen) { ctx.fillStyle = 'rgba(120,200,255,.10)'; ctx.fillRect(0, 0, W, H); }
   hurtFlash = Math.max(0, hurtFlash - dt * 1.5);
   if (hurtFlash > 0) { ctx.fillStyle = `rgba(160,0,0,${hurtFlash * 0.5})`; ctx.fillRect(0, 0, W, H); }
