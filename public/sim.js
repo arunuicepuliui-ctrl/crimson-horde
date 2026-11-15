@@ -9,6 +9,7 @@ const COLORS = ['#4fc3f7', '#ffb74d', '#aed581', '#f06292', '#ba68c8', '#fff176'
 const BI = Object.fromEntries(S.BONUSES.map((b, i) => [b.key, i]));
 const REVIVE_TIME = 2.5;
 const PERK_TIMEOUT = 20;
+const TELE_TIME = 0.35;
 
 let nextId = 1;
 const rnd = (a, b) => a + Math.random() * (b - a);
@@ -123,6 +124,7 @@ class Room {
     if (!m || typeof m !== 'object') return;
     if (m.t === 'i') {
       if (Number.isFinite(m.a)) p.aim = m.a;
+      if (Number.isFinite(m.d)) p.aimD = clamp(m.d, 0, 1200);
       p.firing = !!m.f;
       if (m.r) p.wantReload = true;
       const now = Date.now();
@@ -207,6 +209,7 @@ class Room {
   }
 
   fire(p, w, st) {
+    if (w.kind === 5) return this.fireShock(p, w, st);
     const a0 = p.aim, mx = p.x + Math.cos(a0) * 22, my = p.y + Math.sin(a0) * 22;
     for (let i = 0; i < w.pellets; i++) {
       if (this.bullets.length >= MAX_BULLETS) break;
@@ -220,6 +223,42 @@ class Room {
       });
     }
     this.ev.push(['f', p.id, p.weapon]);
+  }
+
+  // Shock Chain: instant bolt to the first enemy on the aim line, then arcs enemy to enemy.
+  fireShock(p, w, st) {
+    const ca = Math.cos(p.aim), sa = Math.sin(p.aim);
+    const sx = p.x + ca * 22, sy = p.y + sa * 22;
+    let first = null, best = w.range;
+    for (const e of this.enemies) {
+      if (e.dead) continue;
+      const dx = e.x - sx, dy = e.y - sy, along = dx * ca + dy * sa;
+      if (along < -e.r || along > best + e.r) continue;
+      if (Math.abs(dx * -sa + dy * ca) > e.r + 16) continue; // perpendicular distance from the aim line
+      if (along < best) { best = along; first = e; }
+    }
+    const pts = [R(sx), R(sy)];
+    this.ev.push(['f', p.id, p.weapon]);
+    if (!first) { pts.push(R(sx + ca * w.range), R(sy + sa * w.range)); this.ev.push(['z', pts]); return; }
+    const hit = new Set();
+    let cur = first, dmg = w.dmg * st.dmgMul, ang = p.aim, px = sx, py = sy;
+    const hops = w.chain + st.pierce; // Uranium Rounds add extra arcs
+    for (let i = 0; cur && i <= hops; i++) {
+      hit.add(cur.id);
+      pts.push(R(cur.x), R(cur.y));
+      ang = Math.atan2(cur.y - py, cur.x - px); px = cur.x; py = cur.y;
+      if (this.hitEv < 50) { this.hitEv++; this.ev.push(['h', R(cur.x), R(cur.y), +ang.toFixed(2)]); }
+      this.damage(cur, dmg, p.id, ang);
+      dmg *= w.falloff;
+      let next = null, nd = w.jump * w.jump;
+      for (const e of this.enemies) {
+        if (e.dead || hit.has(e.id)) continue;
+        const d = (e.x - px) ** 2 + (e.y - py) ** 2;
+        if (d < nd) { nd = d; next = e; }
+      }
+      cur = next;
+    }
+    this.ev.push(['z', pts]);
   }
 
   pickType() {
@@ -449,6 +488,16 @@ class Room {
         if (p.perks.magnet && d < 230 && d > 1) { k.x += (dx / d) * 320 * dt; k.y += (dy / d) * 320 * dt; }
         if (d < 28) { this.collect(p, k); k.t = 0; break; }
       }
+      if (k.t <= 0) continue;
+      // Telekinetic: crosshair held on the pickup fills k.tk; full -> collected by that player
+      let held = null;
+      for (const p of alive) {
+        if (!p.perks.tele || p.aimD === undefined) continue;
+        const cx = p.x + Math.cos(p.aim) * p.aimD, cy = p.y + Math.sin(p.aim) * p.aimD;
+        if ((cx - k.x) ** 2 + (cy - k.y) ** 2 < 34 * 34 && (p.x - k.x) ** 2 + (p.y - k.y) ** 2 < 900 * 900) { held = p; break; }
+      }
+      k.tk = held ? (k.tk || 0) + dt : 0;
+      if (held && k.tk >= TELE_TIME) { this.collect(held, k); k.t = 0; }
     }
     this.pickups = this.pickups.filter((k) => k.t > 0);
   }
@@ -554,7 +603,7 @@ class Room {
     for (const e of this.enemies) if (!e.dead) E.push([e.id, e.ti, R(e.x), R(e.y), R(e.a * 100), R((Math.max(0, e.hp) / e.mhp) * 100)]);
     for (const b of this.bullets) B.push([R(b.x), R(b.y), R(b.vx), R(b.vy), b.kind]);
     for (const b of this.ebullets) EB.push([R(b.x), R(b.y), R(b.vx), R(b.vy)]);
-    for (const k of this.pickups) K.push([k.id, k.bi, R(k.x), R(k.y), k.w, +k.t.toFixed(1)]);
+    for (const k of this.pickups) K.push([k.id, k.bi, R(k.x), R(k.y), k.w, +k.t.toFixed(1), R(Math.min(1, (k.tk || 0) / TELE_TIME) * 100)]);
     const PZ = [];
     for (const p of this.players.values()) if (p.choices) PZ.push([p.id, this.noPerkTimeout ? 0 : Math.ceil(p.choiceT || PERK_TIMEOUT)]);
     const shared = JSON.stringify({ pz: PZ, tm: +this.t.toFixed(3), rd: this.round, fz: this.freezeT > 0 ? 1 : 0, ov: this.over ? 1 : 0, p: P, e: E, b: B, eb: EB, k: K, ev: this.ev });

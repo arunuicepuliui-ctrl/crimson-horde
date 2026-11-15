@@ -206,7 +206,9 @@ function stampEnemy(ti, x, y, a, t, variant, Z, ox, oy) {
   ctx.drawImage(img, -h, -h);
 }
 
-const GUNLEN = [16, 17, 20, 24, 22, 26, 24, 20];
+const GUNLEN = [16, 17, 20, 24, 22, 26, 24, 20, 22];
+const NO_SHELLS = new Set(['flamer', 'plasma', 'shock']);
+const ejects = (w) => !NO_SHELLS.has(S.WEAPONS[w].key);
 function drawPlayer(c, x, y, a, color, o) {
   c.save(); c.translate(x, y);
   if (o.down) {
@@ -272,6 +274,7 @@ const SFX = {
       case 5: tone(2400, 90, 0.3, 0.16 * v, 'sawtooth'); noise(0.15, 3000, 0.25 * v); break;
       case 6: noise(0.3, 500, 0.5 * v, 'lowpass'); break;
       case 7: noise(0.08, 500, 0.18 * v, 'lowpass'); break;
+      case 8: tone(1800, 300, 0.12, 0.1 * v, 'sawtooth'); noise(0.14, 4200, 0.3 * v, 'highpass'); break;
     }
   },
   splat(v = 1) { noise(0.12, 380, 0.35 * v, 'lowpass'); },
@@ -285,7 +288,7 @@ const SFX = {
 };
 
 // ---------- particles & floating text ----------
-const parts = [], texts = [];
+const parts = [], texts = [], bolts = [];
 function addPart(p) { if (parts.length < 900) parts.push(p); }
 function bloodSpray(x, y, ang, ti, n, spd = 160) {
   const col = BLOOD[ti] || BLOOD[0];
@@ -308,7 +311,7 @@ function floatText(x, y, s, color = '#fff', big = false) { texts.push({ x, y, s,
 // ---------- network state ----------
 let ws = null, myId = 0, roomCode = '', roster = new Map();
 let snaps = [], me = null, clockOff = null, lastRound = 0, overShown = false;
-const local = { x: MAP / 2, y: MAP / 2, ep: -1, aim: 0 };
+const local = { x: MAP / 2, y: MAP / 2, ep: -1, aim: 0, aimD: 0 };
 const keys = {}, mouse = { x: 0, y: 0, down: false };
 let reloadReq = false, shake = 0, hurtFlash = 0, nukeFlash = 0, prevHp = null, lastShotFx = new Map();
 let predAmmo = 0, lastSrvAmmo = -1, lastSrvW = -1, localCd = 0, lastReloadUi = 0;
@@ -411,13 +414,14 @@ function processEvents(ev) {
         break;
       }
       case 'h': bloodSpray(e[1], e[2], e[3], 0, 3, 140); break;
+      case 'z': if (bolts.length < 40) bolts.push({ pts: e[1], life: 0.16 }); break;
       case 'x': explosionFx(e[1], e[2], e[3]); scorch(e[1], e[2], e[3] * 0.7); shake = Math.max(shake, 10 * vol(e[1], e[2])); SFX.boom(vol(e[1], e[2])); break;
       case 'n': nukeFlash = 1; shake = 28; scorch(e[1], e[2], 300); SFX.boom(1); setTimeout(() => SFX.boom(0.7), 120); break;
       case 'f': {
         if (e[1] === myId) break;
         const s = latestSnap(); const p = s && s.Pm.get(e[1]);
         lastShotFx.set(e[1], performance.now());
-        if (p) { SFX.shot(e[2], vol(p[1], p[2]) * 0.6); if (e[2] !== 7 && e[2] !== 4) shell(p[1], p[2], p[3] / 100); }
+        if (p) { SFX.shot(e[2], vol(p[1], p[2]) * 0.6); if (ejects(e[2])) shell(p[1], p[2], p[3] / 100); }
         break;
       }
       case 'p': {
@@ -461,7 +465,7 @@ cv.addEventListener('contextmenu', (e) => e.preventDefault());
 function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
 setInterval(() => {
   if (!me) return;
-  send({ t: 'i', x: +local.x.toFixed(1), y: +local.y.toFixed(1), a: +local.aim.toFixed(3), f: mouse.down ? 1 : 0, r: reloadReq ? 1 : 0, ep: local.ep });
+  send({ t: 'i', x: +local.x.toFixed(1), y: +local.y.toFixed(1), a: +local.aim.toFixed(3), d: Math.round(local.aimD), f: mouse.down ? 1 : 0, r: reloadReq ? 1 : 0, ep: local.ep });
   reloadReq = false;
 }, 1000 / 30);
 
@@ -619,13 +623,14 @@ function update(dt) {
   // aim from player's screen position
   const sx = W / 2 + (local.x - cam.x) * ZOOM, sy = H / 2 + (local.y - cam.y) * ZOOM;
   local.aim = Math.atan2(mouse.y - sy, mouse.x - sx);
+  local.aimD = Math.hypot(mouse.x - sx, mouse.y - sy) / ZOOM;
   // predicted local shooting feedback (sound, flash, shells)
   if (mouse.down && !me.dn && !over && !me.rl && predAmmo > 0) {
     localCd -= dt;
     let n = 0;
     while (localCd <= 0 && predAmmo > 0 && n < 4) {
       SFX.shot(me.w, 1); lastShotFx.set(myId, performance.now()); predAmmo--; n++;
-      if (me.w !== 7 && me.w !== 4) shell(local.x, local.y, local.aim);
+      if (ejects(me.w)) shell(local.x, local.y, local.aim);
       if (me.w === 2) shake = Math.max(shake, 4); else if (me.w === 5 || me.w === 6) shake = Math.max(shake, 5);
       localCd += 1 / me.fr;
     }
@@ -672,7 +677,8 @@ function render(dt, t) {
 
   // pickups (latest state, no interpolation needed)
   for (const k of L.k) {
-    const [, bi, x, y, w, ttl] = k;
+    const [, bi, x, y, w, ttl, tk] = k;
+    if (tk > 0) { ctx.strokeStyle = '#ce93d8'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x, y, 24, -Math.PI / 2, -Math.PI / 2 + TAU * tk / 100); ctx.stroke(); }
     if (!inView(x, y)) continue;
     if (ttl < 3 && Math.floor(t * 8) % 2) continue;
     drawPickup(x, y, bi, w, t);
@@ -757,6 +763,27 @@ function render(dt, t) {
       case 4: ctx.globalAlpha = 0.55; ell(ctx, x, y, rnd(5, 10), rnd(5, 10), pick(['#ff9800', '#ffb74d', '#ff5722', '#ffeb3b'])); ctx.globalAlpha = 1; break;
     }
   }
+  // Shock Chain bolts: jagged lines re-randomised every frame so they flicker
+  for (let i = bolts.length - 1; i >= 0; i--) {
+    const bo = bolts[i]; bo.life -= dt;
+    if (bo.life <= 0) { bolts[i] = bolts[bolts.length - 1]; bolts.pop(); continue; }
+    const f = bo.life / 0.16, P = bo.pts;
+    const path = () => {
+      ctx.beginPath(); ctx.moveTo(P[0], P[1]);
+      for (let j = 2; j < P.length; j += 2) {
+        const x0 = P[j - 2], y0 = P[j - 1], x1 = P[j], y1 = P[j + 1], len = Math.hypot(x1 - x0, y1 - y0), n = Math.max(2, (len / 22) | 0);
+        const nx = -(y1 - y0) / (len || 1), ny = (x1 - x0) / (len || 1);
+        for (let k = 1; k < n; k++) { const tt = k / n, off = rnd(-9, 9); ctx.lineTo(x0 + (x1 - x0) * tt + nx * off, y0 + (y1 - y0) * tt + ny * off); }
+        ctx.lineTo(x1, y1);
+      }
+    };
+    ctx.lineJoin = 'round';
+    ctx.globalAlpha = 0.35 * f; ctx.strokeStyle = '#4fc3ff'; ctx.lineWidth = 9; path(); ctx.stroke();
+    ctx.globalAlpha = f; ctx.strokeStyle = '#e8f7ff'; ctx.lineWidth = 2; path(); ctx.stroke();
+    for (let j = 2; j < P.length; j += 2) { ctx.globalAlpha = 0.5 * f; ell(ctx, P[j], P[j + 1], 10, 10, '#81d4fa'); }
+    ctx.globalAlpha = 1;
+  }
+
   for (const eb of L.eb) {
     const x = eb[0] + eb[2] * (frozen ? 0 : bdt), y = eb[1] + eb[3] * (frozen ? 0 : bdt);
     ctx.globalAlpha = 0.4; ell(ctx, x, y, 9, 9, '#a5ff4a'); ctx.globalAlpha = 1; ell(ctx, x, y, 4.5, 4.5, '#e6ffb0');
