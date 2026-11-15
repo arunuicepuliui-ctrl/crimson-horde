@@ -14,29 +14,35 @@ const useRedis = !!(URL_ && TOKEN);
 
 let entries = [];
 let saveTimer = null;
+let loaded = false; // never save before the stored board was read, or a failed load would overwrite it
 
 const better = (a, b) => b.kills - a.kills || b.time - a.time || a.date - b.date; // sort comparator
 const norm = (n) => n.trim().toLowerCase();
 
 async function load() {
   try {
+    let stored = [];
     if (useRedis) {
       const r = await fetch(`${URL_}/get/${encodeURIComponent(KEY)}`, { headers: { Authorization: `Bearer ${TOKEN}` } });
       const j = await r.json();
       if (j.error) throw new Error(j.error);
-      entries = j.result ? JSON.parse(j.result) : [];
+      stored = j.result ? JSON.parse(j.result) : [];
     } else if (fs.existsSync(FILE)) {
-      entries = JSON.parse(fs.readFileSync(FILE, 'utf8'));
+      stored = JSON.parse(fs.readFileSync(FILE, 'utf8'));
     }
-    if (!Array.isArray(entries)) entries = [];
-    console.log(`Leaderboard: ${entries.length} entries loaded from ${useRedis ? 'Upstash Redis' : FILE}`);
+    if (!Array.isArray(stored)) throw new Error('stored leaderboard is not a list');
+    const pending = entries; // runs finished while the board was unavailable
+    entries = stored; loaded = true;
+    for (const run of pending) submit(run);
+    console.log(`Leaderboard: ${stored.length} entries loaded from ${useRedis ? 'Upstash Redis' : FILE}`);
   } catch (e) {
-    console.error('Leaderboard load failed:', e.message);
-    entries = [];
+    console.error(`Leaderboard load failed (${e.message}); retrying in 30 s, nothing will be saved until it loads`);
+    setTimeout(load, 30000);
   }
 }
 
 async function save() {
+  if (!loaded) return;
   const data = JSON.stringify(entries);
   try {
     if (useRedis) {
